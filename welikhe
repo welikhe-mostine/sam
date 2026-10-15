@@ -1,0 +1,125 @@
+%% Industrial Sensor Telemetry Simulator in MATLAB
+% Simulates an industrial sensor stream through PCM, Manchester coding, 
+% BPSK modulation, an AWGN channel, and analyzes reconstruction errors.
+
+clear; clc; close all;
+
+%% 1. Simulation Configuration
+fs = 100;               % Sampling frequency (Hz)
+duration = 10;          % Duration of signal in seconds
+t = 0:1/fs:duration-1/fs;
+num_samples = length(t);
+
+% Sensor Baseline & Fluctuation (Slow sine wave + minor random noise)
+sensor_freq = 0.2;      % 0.2 Hz slow thermal/vibration variation
+baseline = 50;          % Baseline sensor value (e.g., °C)
+amplitude = 25;         % Fluctuation amplitude
+analog_signal = baseline + amplitude * sin(2*pi*sensor_freq*t) + 1.5 * randn(1, num_samples);
+
+%% 2. Sampling & 8-bit PCM Quantization
+% 8-bit quantization = 2^8 = 256 levels
+n_bits = 8;
+min_val = min(analog_signal);
+max_val = max(analog_signal);
+
+% Quantize signal to integer levels [0, 255]
+quantized_levels = round((analog_signal - min_val) / (max_val - min_val) * (2^n_bits - 1));
+quantized_levels = max(0, min(2^n_bits - 1, quantized_levels)); % Clamp bounds
+
+% Convert quantization levels to a serial binary stream (matrix of bits)
+binary_matrix = de2bi(quantized_levels, n_bits, 'left-msb'); 
+bits_stream = binary_matrix(:)'; % Flatten into a 1D bit stream (0s and 1s)
+
+%% 3. Line Coding (Manchester Encoding)
+% Manchester Coding: '0' -> High-to-Low transition [1, -1]; '1' -> Low-to-High [-1, 1]
+samples_per_bit = 10; % Oversampling for waveform representation
+manchester_signal = [];
+
+for i = 1:length(bits_stream)
+    if bits_stream(i) == 0
+        % High to Low
+        pulse = [ones(1, samples_per_bit/2), -ones(1, samples_per_bit/2)];
+    else
+        % Low to High
+        pulse = [-ones(1, samples_per_bit/2), ones(1, samples_per_bit/2)];
+    end
+    manchester_signal = [manchester_signal, pulse];
+end
+
+%% 4. Modulation (BPSK)
+% Map bit stream to BPSK symbols: 0 -> +1, 1 -> -1 (or vice versa)
+bpsk_symbols = 1 - 2 * bits_stream; % 0 -> +1, 1 -> -1
+
+% Upsample symbols for carrier modulation representation
+symbol_duration_samples = samples_per_bit;
+carrier_signal_base = repelem(bpsk_symbols, symbol_duration_samples);
+
+% Generate high-frequency carrier wave
+fc = 5; % Carrier frequency
+t_comm = (0:length(carrier_signal_base)-1) / (fs * symbol_duration_samples);
+carrier = cos(2*pi*fc*t_comm);
+
+% Modulated BPSK Signal
+modulated_signal = carrier_signal_base .* carrier;
+
+%% 5. Channel Impairment (AWGN Channel)
+EbNo_dB = 5; % Desired Eb/No in dB (Factory floor noise environment)
+snr_dB = EbNo_dB - 10*log10(symbol_duration_samples/2); % Adjust SNR for oversampling
+noisy_signal = awgn(modulated_signal, snr_dB, 'measured');
+
+%% 6. Demodulation & Reconstruction
+% Coherent Demodulation: Multiply by carrier and low-pass filter
+demod_product = noisy_signal .* carrier;
+% Simple integration/moving average filter over symbol duration
+filter_window = ones(1, symbol_duration_samples) / symbol_duration_samples;
+filtered_signal = filter(filter_window, 1, demod_product);
+
+% Sample at the center of each symbol period
+sample_indices = symbol_duration_samples : symbol_duration_samples : length(filtered_signal);
+received_symbols = filtered_signal(sample_indices);
+
+% Threshold detection to recover bits
+rx_bits = (received_symbols < 0); % If negative -> 1, if positive -> 0
+
+% Reshape recovered bits back into 8-bit words
+rx_binary_matrix = reshape(rx_bits, n_bits, [])';
+rx_quantized_levels = bi2de(rx_binary_matrix, 'left-msb');
+
+% De-quantize back to analog scale
+reconstructed_signal = rx_quantized_levels' * (max_val - min_val) / (2^n_bits - 1) + min_val;
+
+%% 7. Error Analysis & Visualization
+% Calculate Bit Error Rate (BER)
+num_errors = sum(bits_stream ~= rx_bits);
+ber = num_errors / length(bits_stream);
+fprintf('--- Simulation Results ---\n');
+fprintf('Total Bits Transmitted: %d\n', length(bits_stream));
+fprintf('Bit Errors Detected: %d\n', num_errors);
+fprintf('Bit Error Rate (BER): %.5f\n', ber);
+
+% Plotting the results
+figure('Name', 'Industrial Sensor Telemetry Simulation', 'Position', [100, 100, 1200, 800]);
+
+% Subplot 1: Original vs Reconstructed Sensor Data
+subplot(3, 1, 1);
+plot(t, analog_signal, 'b-', 'LineWidth', 1.5); hold on;
+plot(t, reconstructed_signal, 'r--', 'LineWidth', 1.2);
+grid on;
+title(sprintf('Industrial Sensor Telemetry (AWGN Channel, Eb/N0 = %d dB, BER = %.4f)', EbNo_dB, ber));
+xlabel('Time (s)'); ylabel('Sensor Value (°C)');
+legend('Original Analog Signal', 'Reconstructed Signal');
+
+% Subplot 2: Manchester Encoded Waveform (Zoomed)
+subplot(3, 1, 2);
+plot(t_comm(1:200), manchester_signal(1:200), 'k-', 'LineWidth', 1.5);
+grid on;
+title('Manchester Line Code Waveform (Zoomed First 10 Bits)');
+xlabel('Time (s)'); ylabel('Amplitude');
+ylim([-1.5, 1.5]);
+
+% Subplot 3: Noisy BPSK Modulated Waveform (Zoomed)
+subplot(3, 1, 3);
+plot(t_comm(1:200), noisy_signal(1:200), 'm-', 'LineWidth', 1);
+grid on;
+title('BPSK Modulated Signal through AWGN Channel (Zoomed)');
+xlabel('Time (s)'); ylabel('Amplitude');
